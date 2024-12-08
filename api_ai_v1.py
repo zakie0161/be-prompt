@@ -34,19 +34,27 @@ from langchain.agents import create_tool_calling_agent
 import matplotlib.pyplot as plt
 import plotly.express as px
 
-from config import AUTO_CHART_PROMPT, PROMPT_CHART, SYSTEM_PREFIX, SYSTEM_PREFIX_SQL_TOOL
+from config import (
+    AUTO_CHART_PROMPT,
+    PROMPT_CHART,
+    SYSTEM_PREFIX,
+    SYSTEM_PREFIX_SQL_TOOL,
+)
 
 # Flask app
 app = Flask(__name__)
 app.secret_key = "my_secret_key"
 
-CORS(app, origins=["http://localhost:3000"], supports_credentials=True)
+CORS(app, origins=["http://localhost:3000","http://100.83.49.115:3000"], supports_credentials=True)
 
 # Configure Flask-Session to use server-side sessions
 app.config["SESSION_TYPE"] = "redis"
 app.config["SESSION_PERMANENT"] = False  # Session won't expire unless manually set
 app.config["SESSION_USE_SIGNER"] = True  # Adds a secure signature to the session cookie
 app.config["SESSION_REDIS"] = redis.StrictRedis(host="localhost", port=6379, db=0)
+REDIS_URL = "redis://:password@c0af-2400-9800-2e0-4c58-5081-3c83-8164-9dd2.ngrok-free.app:6379/0"
+
+# app.config["SESSION_REDIS"] = redis.StrictRedis.from_url(REDIS_URL)
 # Configure session cookie options
 
 # Initialize the session extension
@@ -78,7 +86,7 @@ def get_engine_database(guid):
     encoded_password = quote(database_connection["password"])
 
     # URL koneksi PostgreSQL Anda
-    database_url_encoded = f"postgresql://{database_connection["user"]}:{encoded_password}@{database_connection["host"]}:{database_connection["port"]}/{database_connection["database_name"]}"
+    database_url_encoded = f"{database_connection["database_type"]}://{database_connection["user"]}:{encoded_password}@{database_connection["host"]}:{database_connection["port"]}/{database_connection["database_name"]}"
 
     engine = create_engine(database_url_encoded)
     return engine
@@ -234,6 +242,16 @@ layout_prompt = ChatPromptTemplate.from_messages(
     ]
 )
 
+query_prompt = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            SYSTEM_PREFIX,
+        ),
+        ("human", "{input}"),
+    ]
+)
+
 custom_prompt = ChatPromptTemplate.from_messages(
     [
         (
@@ -273,12 +291,35 @@ def clean_generation_result(result: str) -> str:
         .replace(";", "")
     )
 
+def clean_generation_result_stream(stream):
+    def _normalize_whitespace(s: str) -> str:
+        return re.sub(r"\s+", " ", s).strip()
+
+    def validate_chunk(chunk: str) -> bool:
+        # Example validation: Ensure the chunk is a non-empty string
+        return isinstance(chunk, str) and len(chunk.strip()) > 0
+
+    cleaned_chunks = []
+    for chunk in stream:
+        print(f"Chunk received: {chunk}")  # Debug log
+        if validate_chunk(chunk):
+            cleaned_chunk = (
+                _normalize_whitespace(chunk)
+                .replace("\\n", " ")
+                .replace("```sql", "")
+                .replace('"""', "")
+                .replace("'''", "")
+                .replace("```", "")
+                .replace(";", "")
+            )
+            cleaned_chunks.append(cleaned_chunk)
+
+    # Assemble cleaned chunks into a single statement
+    return " ".join(cleaned_chunks)
+
+
 def clean_generation_python(result: str) -> str:
-    return (
-         result
-        .replace("```python", "")
-        .replace("```", "")
-    )
+    return result.replace("```python", "").replace("```", "")
 
 
 def generateQuery(input, guid):
@@ -291,6 +332,12 @@ def generateQuery(input, guid):
         result = chain.invoke({"input": input})
         sql = clean_generation_result(result.content)
 
+        if not guid:
+            return (
+                jsonify({"result": sql}),
+                200,
+            )
+
         engine = get_engine_database(guid)
 
         if is_sql_query(sql):
@@ -301,9 +348,6 @@ def generateQuery(input, guid):
                 )  # Execute the SQL query against the database
                 df = pd.DataFrame(data)
 
-                # df.columns = [col.replace("_", " ").title() for col in df.columns]
-
-                # result_chart = generateChartFromDataframe(df)
                 result = str(df.head(len(df)).to_markdown(index=False, floatfmt=".1f"))
 
                 # parsed_result_chart = json.loads(result_chart.to_json())
@@ -311,10 +355,7 @@ def generateQuery(input, guid):
                 # print(json.loads(df.head(len(df)).to_json()))
 
                 return (
-                    jsonify(
-                        # {"result": result, "table": True, "chart": parsed_result_chart}
-                        {"result": result, "table": True}
-                    ),
+                    jsonify({"result": result, "table": True}),
                     200,
                 )
             except Exception as e:
@@ -323,6 +364,20 @@ def generateQuery(input, guid):
             return jsonify({"result": sql, "table": False}), 200
     except Exception as e:
         return jsonify({"error": "Failed to connect !"}), 500
+    
+def generateQueryStream(input):
+
+    llm = get_llm()
+
+    chain = query_prompt | llm
+    result = chain.invoke({"input": input})
+
+    result_generator = chain.stream(
+        {"input": result.content},
+    )
+    
+    for chunk in result_generator:
+        yield chunk.content    
 
 
 def generateChartFromDataframe(df: pd.DataFrame):
@@ -415,6 +470,7 @@ def generateFromCustomPrompt(input, custom_prompt_text):
     # )
     return result.content
 
+
 def generateFromChart(input, guid):
 
     llm = get_llm()
@@ -433,17 +489,23 @@ def generateFromChart(input, guid):
     data = pd.read_sql(sql_query, engine)  # Execute the SQL query against the database
     df = pd.DataFrame(data)
 
-    column_info = "\n".join([f"- {col}: {dtype}" for col, dtype in zip(df.columns, df.dtypes)])
-    
+    column_info = "\n".join(
+        [f"- {col}: {dtype}" for col, dtype in zip(df.columns, df.dtypes)]
+    )
+
     result = chain_with_history.invoke(  # noqa: T201
-        {"input": input, "column_info": column_info,},
-        config={"configurable": {"session_id": "chart"}},
+        {
+            "input": input,
+            "column_info": column_info,
+        },
+        config={"configurable": {"session_id": "chart"}}
     )
 
     tool = PythonAstREPLTool(locals={"df": df, "px": px})
 
     fixed_code = clean_generation_python(result.content)
     output = tool.run(fixed_code)
+    print(output)
     return json.loads(output)
 
 
@@ -517,8 +579,8 @@ def handle_generate_query():
     return sql
 
 
-@app.route("/generate-json", methods=["POST"])
-def handle_generate_json():
+@app.route("/nl-to-sql-stream", methods=["POST"])
+def handle_nl_to_sql():
     # Get the JSON payload from the request
     data = request.json
     input_query = data.get("input")  # Extract the 'input' field
@@ -527,16 +589,13 @@ def handle_generate_json():
     if not input_query:
         return jsonify({"error": "Missing input query or SQL query"}), 400
 
-    # Assuming you have a function 'generateJson' to process the queries
-    try:
-        result = generateJson(input_query)  # This should return the desired JSON
-    except Exception as e:
-        # Handle any errors that might occur in the 'generateJson' function
-        return jsonify({"error": f"Error generating JSON: {str(e)}"}), 500
+    def generate_response():
+        for chunk in generateQueryStream(
+            input_query
+        ):
+            yield chunk  # Optional: separate chunks with newlines for easier parsing
 
-    parsed_result = json.loads(result)
-    # Return the result from generateJson in the response
-    return jsonify({"result": parsed_result}), 200
+    return Response(stream_with_context(generate_response()), content_type="text/plain")
 
 
 @app.route("/generate-from-custom-prompt", methods=["POST"])
@@ -580,6 +639,19 @@ def handle_generate_from_custom_prompt_stream():
 
     return Response(stream_with_context(generate_response()), content_type="text/plain")
 
+@app.route("/generate-from-chart", methods=["POST"])
+def handle_generate_from_chart():
+    # Get the JSON payload from the request
+    data = request.json
+    input_query = data.get("input")  # Extract the 'input' field
+    guid = data.get("guid")  # Extract the 'input' field
+
+    if not input_query:
+        return jsonify({"error": "Missing input"}), 400
+
+    result = generateFromChart(input_query, guid)
+
+    return jsonify({"result": result}), 200
 
 @app.route("/custom-prompt", methods=["POST"])
 def handle_create_custom_prompt():
@@ -659,13 +731,6 @@ def handle_delete_custom_prompt(guid):
     session["custom_prompt"] = updated_prompts
 
     return jsonify({"result": "Prompt deleted successfully"}), 200
-
-
-@app.route("/get-list-custom-prompt", methods=["GET"])
-def handle_get_list_custom_prompt():
-    # Remove the JSON list from the session (GET method)
-    data_list = session.get("custom_prompt", [])
-    return jsonify({"result": data_list}), 200
 
 
 @app.route("/set-ai-host", methods=["POST"])
@@ -793,13 +858,6 @@ def handle_delete_sql_connection(guid):
     return jsonify({"result": "Prompt deleted successfully"}), 200
 
 
-@app.route("/get-list-sql-connection", methods=["GET"])
-def handle_get_list_sql_connection():
-    # Remove the JSON list from the session (GET method)
-    data_list = session.get("sql_connection", [])
-    return jsonify({"result": data_list}), 200
-
-
 @app.route("/training-connection", methods=["POST"])
 def handle_create_training_connection():
     # Get the JSON payload from the request
@@ -831,6 +889,103 @@ def handle_create_training_connection():
     # Return success response
     return jsonify({"result": "Success", "added_entries": new_entries}), 200
 
+@app.route("/thread", methods=["POST"])
+def handle_create_thread():
+    # Get the JSON payload from the request
+    data = request.json
+    # Check if both 'input' and 'sql_input' are provided
+    required_fields = ["name", "source_guid", "type"]
+
+    if not all(field in data for field in required_fields):
+        return jsonify({"error": "Missing field!"}), 400
+
+    prompts = session.get("sql_connection", [])
+
+    now = datetime.now()
+
+    # Convert to string with a literal 'Z' at the end
+    date_string = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    data["guid"] = generate_random_string(10)
+    data["created_at"] = date_string
+
+    # Add the new prompt to the list
+    prompts.append(data)
+
+    session["thread"] = prompts
+
+    # Return the result from generateJson in the response
+    return jsonify({"result": "Success"}), 200
+
+
+@app.route("/thread", methods=["PUT"])
+def handle_update_thread():
+    # Get the JSON payload from the request
+    data = request.json
+    guid = data.get("guid")
+    name = data.get("name")
+    source_guid = data.get("source_guid")
+    type = data.get("type")
+
+    required_fields = ["guid", "name", "source_guid", "type"]
+
+    # Check if 'guid' is provided
+    if not all(field in data for field in required_fields):
+        return jsonify({"error": "Missing 'guid' for update"}), 400
+
+    threads = session.get("thread", [])
+
+    # Find the prompt with the given GUID
+    thread = next((thread for thread in threads if thread["guid"] == guid), None)
+
+    if not thread:
+        return jsonify({"error": "Thread not found"}), 404
+
+    # Update fields if provided
+    if name:
+        thread["name"] = name
+    if source_guid:
+        thread["source_guid"] = source_guid
+    if type:
+        thread["type"] = type
+
+    session["thread"] = threads
+    return jsonify({"result": "Prompt updated successfully"}), 200
+
+
+@app.route("/thread/<guid>", methods=["DELETE"])
+def handle_delete_thread(guid):
+    # Check if 'guid' is provided in the URL
+    if not guid:
+        return jsonify({"error": "Missing 'guid' in URL"}), 400
+
+    threads = session.get("thread", [])
+
+    # Filter out the prompt with the given GUID
+    updated_threads = [thread for thread in threads if thread["guid"] != guid]
+
+    if len(threads) == len(updated_threads):  # No change means the guid was not found
+        return jsonify({"error": "Prompt not found"}), 404
+
+    # Update session
+    session["thread"] = updated_threads
+
+    return jsonify({"result": "Prompt deleted successfully"}), 200
+
+
+@app.route("/get-list-custom-prompt", methods=["GET"])
+def handle_get_list_custom_prompt():
+    # Remove the JSON list from the session (GET method)
+    data_list = session.get("custom_prompt", [])
+    return jsonify({"result": data_list}), 200
+
+
+@app.route("/get-list-sql-connection", methods=["GET"])
+def handle_get_list_sql_connection():
+    # Remove the JSON list from the session (GET method)
+    data_list = session.get("sql_connection", [])
+    return jsonify({"result": data_list}), 200
+
 
 @app.route("/get-list-training-connection/<guid>", methods=["GET"])
 def handle_get_list_training_connection(guid):
@@ -838,6 +993,13 @@ def handle_get_list_training_connection(guid):
     data_list = session.get("training_connection", [])
     filtered_list = [item for item in data_list if item["database_guid"] == guid]
     return jsonify({"result": filtered_list}), 200
+
+
+@app.route("/get-list-thread", methods=["GET"])
+def handle_get_list_thread():
+    # Remove the JSON list from the session (GET method)
+    data_list = session.get("thread", [])
+    return jsonify({"result": data_list}), 200
 
 
 @app.route("/get-list-source", methods=["GET"])
@@ -869,21 +1031,8 @@ def handle_get_list_core():
 
     return jsonify({"result": result}), 200
 
-@app.route("/generate-from-chart", methods=["POST"])
-def handle_generate_from_chart():
-    # Get the JSON payload from the request
-    data = request.json
-    input_query = data.get("input")  # Extract the 'input' field
-    guid = data.get("guid")  # Extract the 'input' field
-
-    if not input_query:
-        return jsonify({"error": "Missing input"}), 400
-    
-    result = generateFromChart(input_query, guid)
-
-    return jsonify({"result": result}), 200
-
 
 # Run Flask app
 if __name__ == "__main__":
-    app.run(port=8000, debug=True)
+    # app.run(port=8000, debug=True)
+    app.run(host="0.0.0.0", port=8000, debug=True)

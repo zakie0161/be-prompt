@@ -53,6 +53,8 @@ The local environment includes a dataframe called `df` with the following column
 You can also create visualizations using `plotly.express` (imported as `px`). 
 Generate a meaningful title for the plot based on the context or column names.
 Always explain the visualization, including why the specific plot type and title were chosen.
-Final result (fig).to_json().
+dont show fig.show().
+Final result (fig).to_json(empty.json).
 Without ```python.
+Do not provide change notes.
 Return python code only, without additional explanations or comments."""
