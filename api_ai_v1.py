@@ -1,8 +1,9 @@
+import pprint
 from flask import Flask, Response, request, jsonify, session
 from flask_session import Session
 from flask_cors import CORS
 from langchain_ollama import ChatOllama
-from typing import List
+from typing import Any, Dict, List
 from sqlalchemy import create_engine
 from langchain_community.vectorstores import FAISS
 from langchain_core.example_selectors import SemanticSimilarityExampleSelector
@@ -30,15 +31,20 @@ from flask import stream_with_context
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from pydantic import BaseModel, Field
 from langchain_experimental.tools.python.tool import PythonAstREPLTool
-from langchain.agents import create_tool_calling_agent
+from langgraph.prebuilt import create_react_agent
 import matplotlib.pyplot as plt
 import plotly.express as px
+from langchain_core.tools import tool
+from langchain.output_parsers import PandasDataFrameOutputParser
+from langchain_core.messages import HumanMessage
+
 
 from config import (
     AUTO_CHART_PROMPT,
     PROMPT_CHART,
     SYSTEM_PREFIX,
     SYSTEM_PREFIX_SQL_TOOL,
+    SYSTEM_PREFIX_TOOL,
 )
 
 # Flask app
@@ -93,6 +99,49 @@ def get_engine_database(guid):
 
 
 def get_full_prompt(guid: str):
+    host = session.get("host", "")
+    training_connections = session.get("training_connection", "")
+
+    filtered_training_list = [
+        item for item in training_connections if item["database_guid"] == guid
+    ]
+
+    training_connection_results = []
+    for item in filtered_training_list:
+        training_connection_results.append(
+            {
+                "input": item["input"],
+                "query": item["query"],
+                "description": item["description"],
+            }
+        )
+
+    example_selector = SemanticSimilarityExampleSelector.from_examples(
+        training_connection_results,
+        OllamaEmbeddings(model="nomic-embed-text", base_url=host),
+        FAISS,
+        k=5,
+        input_keys=["input"],
+    )
+
+    few_shot_prompt = FewShotPromptTemplate(
+        example_selector=example_selector,
+        example_prompt=PromptTemplate.from_template("{query}"),
+        input_variables=["input"],
+        prefix=SYSTEM_PREFIX,
+        suffix="",
+    )
+
+    full_prompt = ChatPromptTemplate.from_messages(
+        [
+            SystemMessagePromptTemplate(prompt=few_shot_prompt),
+            ("human", "{input}"),
+        ]
+    )
+
+    return full_prompt
+
+def get_full_prompt_tool(guid: str):
     host = session.get("host", "")
     training_connections = session.get("training_connection", "")
 
@@ -276,6 +325,71 @@ chart_prompt = ChatPromptTemplate.from_messages(
     ]
 )
 
+@tool
+def execute_sql(sql_query):
+    """Execute valid sql query or return final result"""
+    # Fungsi ini berfungsi sebagai tool kedua.
+    print(f"ini query nya {sql_query}")
+    if(is_sql_query(sql_query)):
+        engine = get_engine_database("QuVaFRRQlo")
+        try:
+            data = pd.read_sql(
+                    sql_query, engine
+                    )  # Execute the SQL query against the database
+            df = pd.DataFrame(data)
+ 
+            parser = PandasDataFrameOutputParser(dataframe=df)
+
+            result = str(df.head(len(df)).to_markdown(index=False, floatfmt=".1f"))
+            return parser
+        except Exception as e:
+            return "Just show final result without additional explanations or comments"
+
+    return "Just show final result"
+
+from langchain.agents import tool, initialize_agent, AgentType
+
+@tool
+def get_similar_query(question: str) -> str:
+    """Dynamically generate SQL queries or responses based on user input."""
+    # Convert the input to lowercase to make it case-insensitive
+    question = question.lower().strip()
+    
+    # Basic patterns for dynamic handling
+    if "list" in question and "cms" in question:
+        return "SELECT * FROM cms"
+    
+    # Handle variations of general queries
+    elif "list" in question:
+        # A general query that can apply to any entity
+        entity = question.replace("list", "").strip()
+        if entity:
+            return f"SELECT * FROM {entity}"
+        else:
+            return "Please specify what you want to list, e.g., 'list users', 'list cms'."
+    
+    elif "hello" in question or "hi" in question:
+        return "Hello, how can I assist you today?"
+    
+    elif "create" in question and "cms" in question:
+        return "INSERT INTO cms (column1, column2, ...) VALUES (value1, value2, ...)"
+    
+    # A catch-all for other common queries
+    elif "show" in question:
+        # 'show' could be a command to list tables or schemas
+        if "tables" in question:
+            return "SHOW TABLES"
+        else:
+            return "Sorry, I didn't fully understand that. Could you be more specific?"
+    
+    # Handle "select" queries dynamically
+    elif "select" in question:
+        return "Please provide the table name and columns you want to select."
+    
+    # Default case if no recognizable pattern is matched
+    else:
+        return "Sorry, I didn't understand your query. Could you rephrase it?"
+
 
 def clean_generation_result(result: str) -> str:
     def _normalize_whitespace(s: str) -> str:
@@ -322,15 +436,40 @@ def clean_generation_python(result: str) -> str:
     return result.replace("```python", "").replace("```", "")
 
 
+# Solely for documentation purposes.
+def format_parser_output(parser_output: Dict[str, Any]) -> None:
+    for key in parser_output.keys():
+        parser_output[key] = parser_output[key].to_dict()
+    return pprint.PrettyPrinter(width=4, compact=True).pprint(parser_output)
+
 def generateQuery(input, guid):
 
-    try:
+    # try:
         llm = get_llm()
         full_prompt = get_full_prompt(guid)
+        full_prompt_tool = get_full_prompt_tool(guid)
+
+        tools = [execute_sql]
+
+        llm_tool = llm.bind_tools(tools)
 
         chain = full_prompt | llm
+        chain_tool = full_prompt_tool | llm_tool
         result = chain.invoke({"input": input})
+        result_tool = chain_tool.invoke({"input": input})
         sql = clean_generation_result(result.content)
+        # agent_executor = create_react_agent(llm, tools)
+        # response = agent_executor.invoke({"messages": [HumanMessage(content="SELECT * FROM cms LIMIT 5;"+f" guid_engine={guid}")]})
+        agent = initialize_agent(
+    tools, 
+    agent_type=AgentType.ZERO_SHOT_REACT_DESCRIPTION, 
+    llm=llm, 
+    verbose=True,
+    prompt=full_prompt_tool
+    )
+        result_agent = agent.invoke(input)
+
+        print(result_agent)
 
         if not guid:
             return (
@@ -362,8 +501,8 @@ def generateQuery(input, guid):
                 return jsonify({"error": f"An error occurred: {e}"}), 500
         else:
             return jsonify({"result": sql, "table": False}), 200
-    except Exception as e:
-        return jsonify({"error": "Failed to connect !"}), 500
+    # except Exception as e:
+    #     return jsonify({"error": "Failed to connect !"}), 500
     
 def generateQueryStream(input):
 

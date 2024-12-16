@@ -6,6 +6,9 @@ If the question does not seem related to the database, just return answer like n
 If Return the SQL query only, without additional explanations or comments.
 """
 
+SYSTEM_PREFIX_TOOL = """Execute valid sql query from few_shot_prompt with tool execute_sql.
+"""
+
 SYSTEM_PREFIX_SQL_TOOL = (
     "You are a helpful assistant. "
     "Use the convert_nl_to_sql_function to respond to the user's input, \n"
