@@ -1,0 +1,46 @@
+# Bytecode files
+*.pyc
+*.pyo
+__pycache__/
+
+# Virtual environment
+venv/
+env/
+.venv/
+ENV/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints
+
+# Editor configurations
+.vscode/
+.idea/
+
+# PyCharm project files
+*.iml
+
+# IDE / Editor files
+*.swp
+*~
+.DS_Store  # For macOS
+Thumbs.db  # For Windows
+
+# Dependency directories
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Test files
+.coverage
+nosetests.xml
+pytest_cache/
+*.cover
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+*.egg
+
+# Cython debug symbols
+cython_debug/
