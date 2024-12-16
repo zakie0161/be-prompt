@@ -91,7 +91,7 @@ def get_engine_database(guid):
     encoded_password = quote(database_connection["password"])
 
     # URL koneksi PostgreSQL Anda
-    database_url_encoded = f"{database_connection["database_type"]}://{database_connection["user"]}:{encoded_password}@{database_connection["host"]}:{database_connection["port"]}/{database_connection["database_name"]}"
+    database_url_encoded = f"{database_connection['database_type']}://{database_connection['user']}:{encoded_password}@{database_connection['host']}:{database_connection['port']}/{database_connection['database_name']}"
 
     engine = create_engine(database_url_encoded)
     return engine
