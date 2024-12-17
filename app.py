@@ -56,7 +56,7 @@ CORS(app, origins=["http://localhost:3000","http://100.83.49.115:3000"], support
 app.config["SESSION_TYPE"] = "redis"
 app.config["SESSION_PERMANENT"] = False  # Session won't expire unless manually set
 app.config["SESSION_USE_SIGNER"] = True  # Adds a secure signature to the session cookie
-app.config["SESSION_REDIS"] = redis.StrictRedis(host="localhost", port=6379, db=0)
+app.config["SESSION_REDIS"] = redis.StrictRedis(host="localhost", port=6379, db=0, password="your-strong-password")
 REDIS_URL = "redis://:password@c0af-2400-9800-2e0-4c58-5081-3c83-8164-9dd2.ngrok-free.app:6379/0"
 
 # app.config["SESSION_REDIS"] = redis.StrictRedis.from_url(REDIS_URL)
