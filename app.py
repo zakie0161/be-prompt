@@ -36,7 +36,9 @@ import plotly.express as px
 from langchain_core.tools import tool
 from langchain.output_parsers import PandasDataFrameOutputParser
 from langchain_core.messages import HumanMessage
-
+import sqlite3
+import os
+from langchain_community.chat_message_histories import SQLChatMessageHistory
 
 from config import (
     AUTO_CHART_PROMPT,
@@ -56,7 +58,7 @@ CORS(app, origins=["http://localhost:3000","http://100.83.49.115:3000"], support
 app.config["SESSION_TYPE"] = "redis"
 app.config["SESSION_PERMANENT"] = False  # Session won't expire unless manually set
 app.config["SESSION_USE_SIGNER"] = True  # Adds a secure signature to the session cookie
-app.config["SESSION_REDIS"] = redis.StrictRedis(host="localhost", port=6379, db=0, password="your-strong-password")
+app.config["SESSION_REDIS"] = redis.StrictRedis(host="localhost", port=6379, db=0)
 REDIS_URL = "redis://:password@c0af-2400-9800-2e0-4c58-5081-3c83-8164-9dd2.ngrok-free.app:6379/0"
 
 # app.config["SESSION_REDIS"] = redis.StrictRedis.from_url(REDIS_URL)
@@ -65,6 +67,9 @@ REDIS_URL = "redis://:password@c0af-2400-9800-2e0-4c58-5081-3c83-8164-9dd2.ngrok
 # Initialize the session extension
 Session(app)
 
+folder_path = "database"
+db_name = "ai-db.db"
+db_path = os.path.join(folder_path, db_name)
 
 def get_llm():
     host = session.get("host", "")
@@ -80,6 +85,41 @@ def get_llm():
 
     return llm_model
 
+def get_db_connection():
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def initSqlite():
+   
+    # Create the folder if it does not exist
+    os.makedirs(folder_path, exist_ok=True)
+
+    conn = get_db_connection()
+
+    print(f"Database created successfully at {db_path}")
+
+    cursor = conn.cursor()
+
+    # SQL statement to create the "thread_detail" table
+    create_table_query = """
+    CREATE TABLE IF NOT EXISTS thread_detail (
+        guid TEXT PRIMARY KEY,
+        source TEXT,
+        type TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    """
+
+    # Execute the SQL query
+    cursor.execute(create_table_query)
+    print("Table 'thread_detail' created successfully!")
+
+    # Commit changes and close the connection
+    conn.commit()
+
+    # Close the connection
+    conn.close()
 
 def get_engine_database(guid):
 
@@ -647,26 +687,27 @@ def generateFromChart(input, guid):
     return json.loads(output)
 
 
-def generateFromCustomPromptStream(input, custom_prompt_text):
+def generateFromCustomPromptStream(input, custom_prompt_text, thread_guid):
     llm = get_llm()
 
     chain_custom_prompt = custom_prompt | llm
 
     chain_with_history = RunnableWithMessageHistory(
         chain_custom_prompt,
-        get_by_session_id,  # Function to retrieve session history
+        # get_by_session_id,  # Function to retrieve session history
+        lambda session_id: SQLChatMessageHistory(
+            session_id=session_id, connection_string=f"sqlite:///{db_path}"
+        ),
         input_messages_key="input",  # Key for the input messages
         history_messages_key="history",  # Key for the message history
     )
-
+    
     # Simulate streaming results from the LLM (assuming the LLM supports this)
     result_generator = chain_with_history.stream(
         {"input": input, "custom_prompt": custom_prompt_text},
         config={
             "configurable": {
-                "session_id": (
-                    "custom_prompt" if not custom_prompt_text else "default_prompt"
-                )
+                "session_id": thread_guid
             }
         },
     )
@@ -762,6 +803,7 @@ def handle_generate_from_custom_prompt_stream():
     data = request.json
     input_query = data.get("input")
     guid = data.get("guid")
+    thread_guid = data.get("thread_guid")
 
     if not input_query:
         return jsonify({"error": "Missing input or custom prompt"}), 400
@@ -771,7 +813,7 @@ def handle_generate_from_custom_prompt_stream():
 
     def generate_response():
         for chunk in generateFromCustomPromptStream(
-            input_query, custom_prompt_text=custom_prompt
+            input_query, custom_prompt_text=custom_prompt, thread_guid=thread_guid
         ):
             yield chunk  # Optional: separate chunks with newlines for easier parsing
 
@@ -1032,28 +1074,50 @@ def handle_create_thread():
     # Get the JSON payload from the request
     data = request.json
     # Check if both 'input' and 'sql_input' are provided
-    required_fields = ["name", "source_guid", "type"]
+    required_fields = ["name"]
 
     if not all(field in data for field in required_fields):
         return jsonify({"error": "Missing field!"}), 400
 
-    prompts = session.get("sql_connection", [])
+    prompts = session.get("thread", [])
 
     now = datetime.now()
 
     # Convert to string with a literal 'Z' at the end
     date_string = now.strftime("%Y-%m-%dT%H:%M:%SZ")
-
-    data["guid"] = generate_random_string(10)
+    date_string_db = now.strftime("%Y-%m-%d %H:%M:%S")
+    guid = generate_random_string(10)
+    data["guid"] = guid
     data["created_at"] = date_string
+    data["name"] = data.get("name")
+    data["type"] = data.get("type")
+    data["source_guid"] = data.get("source_guid")
 
     # Add the new prompt to the list
     prompts.append(data)
 
     session["thread"] = prompts
 
-    # Return the result from generateJson in the response
-    return jsonify({"result": "Success"}), 200
+     # Insert into the database
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO thread_detail (guid, source, type, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (guid, None, None, date_string_db)  # Make sure you provide 4 values
+        )
+        conn.commit()
+        conn.close()
+
+        # Return success response
+        return jsonify({"result": "Success", "guid": guid}), 200
+    except sqlite3.IntegrityError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": "Internal Server Error", "details": str(e)}), 500
 
 
 @app.route("/thread", methods=["PUT"])
@@ -1108,6 +1172,35 @@ def handle_delete_thread(guid):
     # Update session
     session["thread"] = updated_threads
 
+    try:
+        # Connect to the database
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        # Query the database for the thread details using the given GUID
+        cursor.execute(
+            """
+            DELETE FROM thread_detail
+            WHERE guid = ?
+            """,
+            (guid,)
+        )
+
+        # Close the connection
+        conn.close()
+
+        # Return the thread details along with the message history
+        return jsonify({"result": "Thread deleted successfully"}), 200
+
+    except Exception as e:
+        # Handle any unexpected server errors
+        return jsonify({"error": "Internal Server Error", "details": str(e)}), 500
+
+@app.route("/clear-thread", methods=["DELETE"])
+def handle_clear_thread():
+    # Update session
+    session["thread"] = []
+
     return jsonify({"result": "Prompt deleted successfully"}), 200
 
 
@@ -1137,7 +1230,81 @@ def handle_get_list_training_connection(guid):
 def handle_get_list_thread():
     # Remove the JSON list from the session (GET method)
     data_list = session.get("thread", [])
-    return jsonify({"result": data_list}), 200
+    # sorted_result = sorted(data_list, key=lambda x: x["created_at"], reverse=True)
+    sorted_data_list = sorted(data_list, key=lambda x: datetime.fromisoformat(x['created_at'].replace("Z", "+00:00")), reverse=True)
+    
+    return jsonify({"result": sorted_data_list}), 200
+
+@app.route("/get-thread/<guid>", methods=["GET"])
+def handle_get_detail_thread(guid):
+
+    if not guid:
+        return jsonify({"error": "Missing 'guid' in URL"}), 400
+
+    history = SQLChatMessageHistory(
+            session_id=guid, connection_string=f"sqlite:///{db_path}"
+        )
+
+    parsed_result = []
+
+    # Iterate through messages and format them
+    for message in history.messages:  # Loop through the messages
+    # Extract the role from response_metadata['message']['role'] if it exists
+        role = message.response_metadata.get("message", {}).get("role", "user")  # Default to 'unknown' if not found
+        # Replace 'assistant' with 'system'
+        if role == "assistant":
+            role = "system"
+        
+        content = message.content  # Extract the content of the message
+    
+        # Append the extracted data as a dictionary to the result list
+        parsed_result.append({"role": role, "content": content})
+
+    # Convert the parsed result to JSON
+    json_result = json.dumps(parsed_result, indent=4, ensure_ascii=False)
+          
+    try:
+        # Connect to the database
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        # Query the database for the thread details using the given GUID
+        cursor.execute(
+            """
+            SELECT guid, source, type, created_at
+            FROM thread_detail
+            WHERE guid = ?
+            """,
+            (guid,)
+        )
+        thread = cursor.fetchone()
+
+        # Close the connection
+        conn.close()
+
+        # If no thread is found, return a 404 error
+        if thread is None:
+            return jsonify({"error": "Thread not found"}), 404
+
+        # Format the result into a dictionary
+        thread_detail = {
+            "guid": thread["guid"],
+            "source": thread["source"],
+            "type": thread["type"],
+            "created_at": thread["created_at"]
+        }
+
+        # Return the thread details along with the message history
+        return jsonify({
+            "result": {
+                "history": json.loads(json_result),
+                "detail": thread_detail
+                }
+        }), 200
+
+    except Exception as e:
+        # Handle any unexpected server errors
+        return jsonify({"error": "Internal Server Error", "details": str(e)}), 500
 
 
 @app.route("/get-list-source", methods=["GET"])
@@ -1173,4 +1340,5 @@ def handle_get_list_core():
 # Run Flask app
 if __name__ == "__main__":
     # app.run(port=8000, debug=True)
+    initSqlite()
     app.run(host="0.0.0.0", port=8000, debug=True)
