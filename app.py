@@ -52,7 +52,7 @@ from config import (
 app = Flask(__name__)
 app.secret_key = "my_secret_key"
 
-CORS(app, origins=["http://localhost:3000","http://100.83.49.115:3000", "https://chat-test-pgiae3gcd-zakie-sapas-projects.vercel.app", "https://chat-test-rose.vercel.app/"], supports_credentials=True)
+CORS(app, origins=["http://localhost:3000","http://100.83.49.115:3000", "https://chat-test-pgiae3gcd-zakie-sapas-projects.vercel.app", "https://chat-test-rose.vercel.app"], supports_credentials=True)
 
 # Configure Flask-Session to use server-side sessions
 # app.config["SESSION_TYPE"] = "redis"
