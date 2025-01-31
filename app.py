@@ -1,6 +1,5 @@
 import pprint
 from flask import Flask, Response, request, jsonify, session
-from flask_session import Session
 from flask_cors import CORS
 from langchain_ollama import ChatOllama
 from typing import Any, Dict, List
@@ -18,13 +17,13 @@ from langchain_core.prompts import (
     MessagesPlaceholder,
 )
 from langchain_core.chat_history import BaseChatMessageHistory
-from langchain_core.messages import BaseMessage, AIMessage
+from langchain_core.messages import BaseMessage, AIMessage, AIMessageChunk
 from langchain_community.embeddings import OllamaEmbeddings
 import json
 import random
 import string
 from datetime import datetime
-import redis
+# import redis
 from langchain.callbacks.streaming_stdout import StreamingStdOutCallbackHandler
 from langchain.callbacks.manager import CallbackManager
 from flask import stream_with_context
@@ -39,9 +38,12 @@ import sqlite3
 import os
 from langchain_community.chat_message_histories import SQLChatMessageHistory
 from langchain.agents import tool
+from langchain.agents import AgentExecutor, create_react_agent
+
 
 from config import (
     AUTO_CHART_PROMPT,
+    CLASSIFY_PROMPT,
     PROMPT_CHART,
     SYSTEM_PREFIX,
     SYSTEM_PREFIX_SQL_TOOL,
@@ -83,7 +85,7 @@ def get_llm():
     llm_model = ChatOllama(
         model="llama3.2",
         temperature=0,
-        base_url=host,
+        # base_url=host,
         streaming=True,
         callbacks=callback_manager,
     )
@@ -216,7 +218,8 @@ def get_full_prompt(guid: str):
     # Example selector
     example_selector = SemanticSimilarityExampleSelector.from_examples(
         training_connection_results,
-        OllamaEmbeddings(model="nomic-embed-text", base_url=global_data.get("host", "")),
+        # OllamaEmbeddings(model="nomic-embed-text", base_url=global_data.get("host", "")),
+        OllamaEmbeddings(model="nomic-embed-text"),
         FAISS,
         k=5,
         input_keys=["input"],
@@ -241,6 +244,158 @@ def get_full_prompt(guid: str):
 
     return full_prompt
 
+
+def get_tool_prompt(guid: str):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    # Fetch training connections for the given database GUID
+    cursor.execute("SELECT input, query, description FROM training_connection WHERE database_guid = ?", (guid,))
+    rows = cursor.fetchall()
+    conn.close()
+
+    # Convert rows to dictionaries
+    training_connection_results = [
+        {"input": row[0], "query": row[1], "description": row[2]} for row in rows
+    ]
+
+    if not training_connection_results:
+        raise ValueError(f"No training connections found for GUID: {guid}")
+
+    # prompt = ChatPromptTemplate.from_messages(
+    # [
+    #     (
+    #         "system",
+    #         """You are a smart assistant specializing in SQL queries and data analysis. 
+    # Your task is to assist users by generating SQL queries and recommending tools for execution or visualization **only if the input matches the provided SQL Dataset.**
+
+    # **Dataset**:
+    # {response_template}
+
+    # **Available Tools**:
+    # {tools}
+
+    # **Instructions**:
+    # 1. If the user's question **matches or closely resembles** one of the SQL examples in Dataset:
+    #    - Identify the corresponding SQL query.
+    #    - If the query is a `SELECT` statement and does not include a limit, automatically append `LIMIT 10` to the query.
+    #    - Select **only one tool** to execute the query or visualize the data.
+    # 2. If the input **does not match any example in Dataset**, do not call any tools. Respond naturally as a conversational AI assistant.
+    # 3. Ensure all arguments for the tool are valid and strictly adhere to the tool's requirements.
+    # 4. If used tool, tool name is required filled.
+    # 5. For SQL-related questions, respond **only in the following valid JSON format**:
+
+    # ```json
+    # {{
+    #     "tool_calls": [
+    #         {{
+    #             "id": "id_value",
+    #             "function": {{
+    #                 "arguments": "{{\\"query\\": \\"your_sql_query\\"}}",
+    #                 "name": "tool_name"
+    #             }},
+    #             "type": "function"
+    #         }}
+    #     ],
+    #     "message": "Final answer recommendation to use tools"
+    # }}
+    # ```
+
+    # **Rules**:
+    # - **Strictly use tools only for SQL-related questions matching Dataset.**
+    # - If the user's input is vague, conversational (e.g., greetings like "ok" or "halo"), or not related to SQL Dataset, **never call any tools. Respond conversationally.**
+    # - Automatically append `LIMIT 10` to all `SELECT` queries if no explicit limit is provided by the user.
+    # - Do not add explanations, Dataset, or text outside the required JSON format when using tools.
+    # - Do not add text or explanations outside of this JSON format.
+
+    # Your role is to interpret user input appropriately and respond conversationally for non-SQL questions or with tools for SQL-specific questions."""
+    #     ),
+    #     MessagesPlaceholder(variable_name="history"),
+    #     (
+    #         "user", 
+    #         """{input}"""
+    #     ),
+    #     ]
+    # )
+
+    prompt = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+             """Anda adalah asisten yang menjawab pertanyaan berdasarkan dataset yang tersedia dan membaca riwayat percakapan untuk memberikan jawaban yang konsisten dan relevan. Anda harus mengikuti aturan berikut:
+
+            - Anda memiliki dataset berikut yang dapat digunakan:
+              {response_template}
+
+            - Anda memiliki tool berikut yang dapat digunakan:
+              - `view_from_database(query hasil)`: Digunakan untuk melihat data dari database dalam format tabel.
+              - `view_chart_from_database(query hasil)`: Digunakan untuk membuat visualisasi data dalam bentuk grafik. Saat menggunakan tool ini, tambahkan atribut metadata sebagai berikut:
+                {{
+                    "chart_type": "default_chart_type",
+                    "color": "default_color or from history",
+                    "title": "default_title or from history",
+                    "xlabel": "default_xlabel or from history",
+                    "ylabel": "default_ylabel or from history"
+                }}
+
+            - Jika pengguna sebelumnya telah menyebutkan pengaturan seperti `chart_type`, `title`, `color`, atau atribut metadata lainnya, gunakan nilai tersebut untuk menggantikan nilai default.
+
+            - Aturan menjawab:
+              1. Jika data tidak ditemukan di dataset, jawab pertanyaan seperti percakapan biasa tanpa menggunakan tool.
+              2. Jika data ditemukan di dataset:
+                 - Untuk tool `view_from_database`, jawab dalam format JSON berikut:
+                   {{
+                       "tool": "view_from_database",
+                       "query": "query_yang_digunakan"
+                   }}
+                 - Untuk tool `view_chart_from_database`, jawab dalam format JSON berikut:
+                   {{
+                       "tool": "view_chart_from_database",
+                       "query": "query_yang_digunakan",
+                       "metadata": {{
+                           "chart_type": "custom_chart_type" (gunakan jika pengguna telah menyebutkan, jika tidak gunakan default),
+                           "color": "custom_color" (gunakan jika pengguna telah menyebutkan, jika tidak gunakan default),
+                           "title": "custom_title" (gunakan jika pengguna telah menyebutkan, jika tidak gunakan default),
+                           "xlabel": "custom_xlabel" (gunakan jika pengguna telah menyebutkan, jika tidak gunakan default),
+                           "ylabel": "custom_ylabel" (gunakan jika pengguna telah menyebutkan, jika tidak gunakan default)
+                       }}
+                   }}
+              3. Jangan pernah memberikan format selain JSON. Jangan gunakan tabel atau format lainnya.
+
+            Contoh tanggapan JSON yang benar untuk `view_from_database`, default minimum select query limit 10:
+            {{
+                "tool": "view_from_database",
+                "query": "select * from transaction_schema.transactions limit 10"
+            }}
+
+            Contoh tanggapan JSON yang benar untuk `view_chart_from_database` dengan metadata disesuaikan:
+            {{
+                "tool": "view_chart_from_database",
+                "query": "select * from cms",
+                "metadata": {{
+                    "chart_type": "line",
+                    "color": "blue",
+                    "title": "Grafik Transaksi",
+                    "xlabel": "Tanggal",
+                    "ylabel": "Jumlah"
+                }}
+            }}
+
+            Chart set all default minimum SELECT limit 10.
+            Set all default minimum limit 10.
+            Pastikan untuk membaca riwayat percakapan dan menggunakan konteks dari percakapan sebelumnya untuk menyempurnakan tanggapan Anda. Jika tidak ada pengaturan metadata yang disebutkan sebelumnya, gunakan nilai default.
+            """
+        ),
+        MessagesPlaceholder(variable_name="history"),
+        (
+            "human",
+            """{input}"""
+        ),
+    ]
+    )
+
+    return prompt
+
 class InMemoryHistory(BaseChatMessageHistory, BaseModel):
     """In memory implementation of chat message history."""
 
@@ -256,13 +411,15 @@ class InMemoryHistory(BaseChatMessageHistory, BaseModel):
 
 # Here we use a global variable to store the chat message history.
 # This will make it easier to inspect it to see the underlying results.
-store = {}
-
 
 def get_by_session_id(session_id: str) -> BaseChatMessageHistory:
-    if session_id not in store:
-        store[session_id] = InMemoryHistory()
-    return store[session_id]
+
+    message_history = SQLChatMessageHistory(
+        session_id=session_id, connection_string=f"sqlite:///{db_path}"
+    )
+    return message_history
+
+
 
 
 examples = [
@@ -330,10 +487,21 @@ chart_prompt = ChatPromptTemplate.from_messages(
             "system",
             PROMPT_CHART,
         ),
-        MessagesPlaceholder(variable_name="history"),
+        # MessagesPlaceholder(variable_name="history"),
         ("human", "{input}"),
     ]
 )
+
+
+classify_prompt = ChatPromptTemplate.from_messages(
+        [
+            (
+                "system",
+                CLASSIFY_PROMPT,
+            ),
+            ("human", "{input}"),
+        ]
+    )
 
 def clean_generation_result(result: str) -> str:
     def _normalize_whitespace(s: str) -> str:
@@ -386,14 +554,288 @@ def format_parser_output(parser_output: Dict[str, Any]) -> None:
         parser_output[key] = parser_output[key].to_dict()
     return pprint.PrettyPrinter(width=4, compact=True).pprint(parser_output)
 
-def generateQuery(input, guid):
 
-    try:
+def plot_chart(data: pd.DataFrame, chart_type: str = 'line', color: str = 'blue', title: str = '', xlabel: str = '', ylabel: str = '') -> None:
+    """
+    Visualisasikan data menggunakan chart dengan penyesuaian warna dan tipe chart.
+
+    :param data: DataFrame yang berisi data untuk chart.
+    :param chart_type: Jenis chart yang ingin digunakan (line, bar, pie, etc.).
+    :param color: Warna chart, bisa menggunakan nama warna ('red', 'blue', etc.) atau kode warna hex.
+    :param title: Judul chart.
+    :param xlabel: Label untuk sumbu X.
+    :param ylabel: Label untuk sumbu Y.
+    """
+    plt.figure(figsize=(10, 6))  # Ukuran chart
+
+    if chart_type == 'line':
+        data.plot(kind='line', color=color)
+    elif chart_type == 'bar':
+        data.plot(kind='bar', color=color)
+    elif chart_type == 'pie':
+        data.plot(kind='pie', subplots=True, colors=[color] * len(data))
+    else:
+        print("Chart type not supported. Supported types: 'line', 'bar', 'pie'.")
+        return
+
+    # Menambahkan judul dan label jika tersedia
+    if title:
+        plt.title(title)
+    if xlabel:
+        plt.xlabel(xlabel)
+    if ylabel:
+        plt.ylabel(ylabel)
+
+    plt.show()
+
+
+@tool
+def view_chart_from_sql(query: str, question: str, chart_type: str = 'line', color: str = 'blue', title: str = '', xlabel: str = '', ylabel: str = '') -> None:
+    """
+    Menjalankan query SQL dan menampilkan chart sesuai hasilnya dengan penyesuaian warna dan tipe chart.
+    Param Query SQL harus dan wajib relate, relevan dengan input yang sudah disediakan, selain itu tolak saja.
+    Minimum limit select 10 count.
+
+    :param question: Pertanyaan atau permintaan yang diberikan user.
+    :param query: Query SQL yang ingin dijalankan.
+    :param chart_type: Jenis chart yang ingin digunakan (line, bar, pie).
+    :param color: Warna chart.
+    :param title: Judul chart.
+    :param xlabel: Label untuk sumbu X.
+    :param ylabel: Label untuk sumbu Y.
+    """
+    # Eksekusi query untuk mendapatkan data
+    return []
+
+@tool
+def view_dataframe_from_sql(query: str) -> pd.DataFrame:
+    """
+    Menjalankan query SQL dan mengembalikan hasilnya dalam bentuk DataFrame.
+    Param Query SQL harus dan wajib relate, relevan dengan input yang sudah disediakan, selain itu tolak saja.
+    Minimum limit select 10 count.
+    (Simulasi: Data statis digunakan untuk keperluan ini.)
+
+    :param query: Query SQL yang ingin dijalankan.
+    :return: DataFrame berisi data hasil eksekusi query.
+    """
+    import pandas as pd
+
+    # Data statis sebagai simulasi hasil eksekusi query SQL
+    data = {
+        'Name': ['Alice', 'Bob', 'Charlie', 'David'],
+        'Age': [25, 30, 35, 40],
+        'City': ['New York', 'Los Angeles', 'Chicago', 'Houston']
+    }
+
+    # Membuat DataFrame
+    df = pd.DataFrame(data)
+
+    # Return DataFrame (bukan langsung menampilkan, agar lebih fleksibel)
+    return df
+
+tools = [view_dataframe_from_sql, view_chart_from_sql]
+
+@tool
+def classify_prompt_ai(prompt: str) -> Dict[str, str]:
+    """
+    Uses AI to classify the given prompt into categories: 'database', 
+    'database_view_chart', or 'general_question'. Also extracts the main question.
+
+    :param prompt: User's input or question.
+    :return: A dictionary containing the original prompt, the category, and the extracted question.
+    """
+    # Initialize the AI model (e.g., GPT-3.5 or GPT-4)
+    llm = get_llm()
+
+    chain = classify_prompt | llm
+    chain.invoke({"input": prompt})
+
+    return chain
+
+def generateQueryString(input, guid, thread_guid):
+
         llm = get_llm()
         full_prompt = get_full_prompt(guid)
 
         chain = full_prompt | llm
-        result = chain.invoke({"input": input})
+        chain_with_history = RunnableWithMessageHistory(
+        chain,
+        lambda session_id: SQLChatMessageHistory(
+            session_id=session_id, connection_string=f"sqlite:///{db_path}"
+        ),
+        input_messages_key="input",  # Key for the input messages
+        history_messages_key="history",  # Key for the message history
+        )
+    
+        # Simulate streaming results from the LLM (assuming the LLM supports this)
+        result = chain_with_history.invoke(
+            {"input": input},
+            config={
+            "configurable": {
+                "session_id": thread_guid
+            }
+            },
+        )
+        sql = clean_generation_result(result.content)
+
+        if not guid:
+            return (
+                jsonify({"result": sql}),
+                200,
+            )
+
+        # engine = get_engine_database(guid)
+
+        return sql
+
+def execute_sql_query(db_path: str, query: str) -> pd.DataFrame:
+    """
+    Eksekusi query SQL di database dan mengembalikan hasilnya sebagai DataFrame.
+
+    :param db_path: Path ke database SQLite.
+    :param query: Query SQL yang ingin dijalankan.
+    :return: DataFrame yang berisi hasil query.
+    """
+    # Membuka koneksi ke database
+    conn = sqlite3.connect(db_path)
+
+    try:
+        # Eksekusi query dan simpan hasilnya ke DataFrame
+        df = pd.read_sql_query(query, conn)
+    finally:
+        conn.close()
+
+    return df
+
+
+def plot_chart(data: pd.DataFrame, chart_type: str = 'line', color: str = 'blue', title: str = '', xlabel: str = '', ylabel: str = '') -> None:
+    """
+    Visualisasikan data menggunakan chart dengan penyesuaian warna dan tipe chart.
+
+    :param data: DataFrame yang berisi data untuk chart.
+    :param chart_type: Jenis chart yang ingin digunakan (line, bar, pie, etc.).
+    :param color: Warna chart, bisa menggunakan nama warna ('red', 'blue', etc.) atau kode warna hex.
+    :param title: Judul chart.
+    :param xlabel: Label untuk sumbu X.
+    :param ylabel: Label untuk sumbu Y.
+    """
+    plt.figure(figsize=(10, 6))  # Ukuran chart
+
+    if chart_type == 'line':
+        data.plot(kind='line', color=color)
+    elif chart_type == 'bar':
+        data.plot(kind='bar', color=color)
+    elif chart_type == 'pie':
+        data.plot(kind='pie', subplots=True, colors=[color] * len(data))
+    else:
+        print("Chart type not supported. Supported types: 'line', 'bar', 'pie'.")
+        return
+
+    # Menambahkan judul dan label jika tersedia
+    if title:
+        plt.title(title)
+    if xlabel:
+        plt.xlabel(xlabel)
+    if ylabel:
+        plt.ylabel(ylabel)
+
+    plt.show()
+
+
+@tool
+def view_chart_from_sql(query: str, chart_type: str = 'line', color: str = 'blue', title: str = '', xlabel: str = '', ylabel: str = '') -> None:
+    """
+    Menjalankan query SQL dan menampilkan chart sesuai hasilnya dengan penyesuaian warna dan tipe chart.
+
+    :param db_path: Path ke database SQLite.
+    :param query: Query SQL yang ingin dijalankan.
+    :param chart_type: Jenis chart yang ingin digunakan (line, bar, pie).
+    :param color: Warna chart.
+    :param title: Judul chart.
+    :param xlabel: Label untuk sumbu X.
+    :param ylabel: Label untuk sumbu Y.
+    """
+    # Eksekusi query untuk mendapatkan data
+    data = execute_sql_query("db_path", query)
+
+    if not data.empty:
+        # Plot chart berdasarkan data yang diperoleh
+        plot_chart(data, chart_type, color, title, xlabel, ylabel)
+    else:
+        print("No data found for the query.")
+
+@tool
+def view_dataframe_from_sql(query: str, guid_engine: str) -> None:
+    """
+    Menjalankan query SQL dan menampilkan hasilnya dalam bentuk DataFrame.
+
+    :param db_path: Path ke database SQLite.
+    :param query: Query SQL yang ingin dijalankan.
+    """
+
+    engine = get_engine_database(guid_engine)
+    if is_sql_query(query):
+            try:
+                data = pd.read_sql(
+                    query, engine
+                )  # Execute the SQL query against the database
+                df = pd.DataFrame(data)
+
+                result = str(df.head(len(df)).to_markdown(index=False, floatfmt=".1f"))
+
+                return result
+            except Exception as e:
+                return e
+
+def view_dataframe_from_sql_run(query: str, guid_engine: str) -> None:
+    """
+    Menjalankan query SQL dan menampilkan hasilnya dalam bentuk DataFrame.
+
+    :param db_path: Path ke database SQLite.
+    :param query: Query SQL yang ingin dijalankan.
+    """
+
+    engine = get_engine_database(guid_engine)
+    if is_sql_query(query):
+            try:
+                data = pd.read_sql(
+                    query, engine
+                )  # Execute the SQL query against the database
+                df = pd.DataFrame(data)
+
+                result = str(df.head(len(df)).to_markdown(index=False, floatfmt=".1f"))
+
+                return result
+            except Exception as e:
+                return e
+
+
+def generateTableLayout(input, guid, thread_guid):
+
+    try:
+        llm = get_llm()
+        full_prompt = get_full_prompt(guid)
+        llm_with_tools = llm.bind_tools([view_chart_from_sql, view_dataframe_from_sql])
+        msg = llm_with_tools.invoke(input)
+        chain = full_prompt | llm
+        chain_with_history = RunnableWithMessageHistory(
+        chain,
+        lambda session_id: SQLChatMessageHistory(
+            session_id=session_id, connection_string=f"sqlite:///{db_path}"
+        ),
+        input_messages_key="input",  # Key for the input messages
+        history_messages_key="history",  # Key for the message history
+        )
+        print(msg)
+        # Simulate streaming results from the LLM (assuming the LLM supports this)
+        result = chain_with_history.invoke(
+            {"input": input},
+            config={
+            "configurable": {
+                "session_id": thread_guid
+            }
+            },
+        )
         sql = clean_generation_result(result.content)
 
         if not guid:
@@ -406,7 +848,6 @@ def generateQuery(input, guid):
 
         if is_sql_query(sql):
             try:
-                global_data["current_query"] = sql
                 data = pd.read_sql(
                     sql, engine
                 )  # Execute the SQL query against the database
@@ -425,6 +866,120 @@ def generateQuery(input, guid):
     except Exception as e:
         return jsonify({"error": "Failed to connect !"}), 500
     
+
+def remove_think_tag(json_string):
+    """Removes content within <think> tags from a JSON string.
+
+    Args:
+        json_string: The JSON string containing the <think> tag.
+
+    Returns:
+        The JSON string with the <think> tag and its content removed, or the original string if no <think> tag is found.
+        Returns None if the input is not a string.
+    """
+    if not isinstance(json_string, str):
+      return None
+
+    pattern = r"<think>.*?</think>"
+    cleaned_string = re.sub(pattern, "", json_string, flags=re.DOTALL)
+    return cleaned_string    
+
+def generateQuery(input, guid, thread_guid):
+        
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+    # Fetch training connections for the given database GUID
+        cursor.execute("SELECT input, query, description FROM training_connection WHERE database_guid = ?", (guid,))
+        rows = cursor.fetchall()
+        conn.close()
+
+    # Convert rows to dictionaries
+        training_connection_results = [
+            {"input": row[0], "query": row[1], "description": row[2]} for row in rows
+        ]
+
+        if not training_connection_results:
+            raise ValueError(f"No training connections found for GUID: {guid}")  
+        for item in training_connection_results:
+            item['question'] = item.pop('input')
+
+    # try:
+        llm = get_llm()
+        tool_prompt = get_tool_prompt(guid)
+        chain = tool_prompt | llm
+        chain_with_history = RunnableWithMessageHistory(
+        chain,
+        get_by_session_id,
+        input_messages_key="input",  # Key for the input messages
+        history_messages_key="history",  # Key for the message history
+        )
+    
+        tools_description = []
+
+        for tool in tools:
+            tools_description.append({
+                "name": tool.name,
+                "description": tool.description,
+                "args": tool.args
+            })
+    
+        # Simulate streaming results from the LLM (assuming the LLM supports this)
+        result = chain_with_history.invoke(
+            {"input": input, "tools": tools_description, "response_template": training_connection_results},
+            config={
+            "configurable": {
+                "session_id": "tools|"+thread_guid
+            }
+            },
+        )
+
+        chat_history = get_by_session_id(thread_guid)
+
+        chat_history.add_message(HumanMessage(content=input))
+
+        cleaned_think = remove_think_tag(result.content)
+        
+        try:
+            parsed_data = json.loads(json.dumps(cleaned_think))
+
+            # Remove the backticks and "json" label
+            result_string = parsed_data.replace("```json\n", "").replace("\n```", "")
+
+            inner_json = json.loads(result_string)
+
+            tool_name = inner_json['tool']
+            query = inner_json['query']
+
+            if(tool_name == 'view_from_database'):
+                result = view_dataframe_from_sql_run(query, guid)
+                chat_history.add_ai_message(message=result)
+                return (
+                            jsonify({"result": result}),
+                                200,
+                )
+            elif(tool_name == 'view_chart_from_database'):
+                result = generateFromChart(input, query, guid, thread_guid)
+                chat_history.add_ai_message(message=result)
+                return (
+                            jsonify({"result": json.loads(result), "chart": True}),
+                                200,
+                )
+
+            return (
+                    jsonify({"result": "question"}),
+                    200,
+                )
+             
+        except Exception as e:
+            chat_history.add_ai_message(message=result)
+            return (
+                jsonify({"result": cleaned_think}),
+                200,
+            )
+    # except Exception as e:
+    #     return jsonify({"error": "Failed to connect !"}), 500
+    
 def generateQueryStream(input):
 
     llm = get_llm()
@@ -440,34 +995,34 @@ def generateQueryStream(input):
         yield chunk.content    
 
 
-def generateFromChart(input, guid):
+def generateFromChart(input, query, guid, thread_guid):
 
     llm = get_llm()
 
     chain_chart = chart_prompt | llm
 
-    chain_with_history = RunnableWithMessageHistory(
-        chain_chart,
-        get_by_session_id,  # Function to retrieve session history
-        input_messages_key="input",  # Key for the input messages
-        history_messages_key="history",  # Key for the message history
-    )
+    # chain_with_history = RunnableWithMessageHistory(
+    #     chain_chart,
+    #     get_by_session_id,  # Function to retrieve session history
+    #     input_messages_key="input",  # Key for the input messages
+    #     history_messages_key="history",  # Key for the message history
+    # )
 
-    sql_query = global_data.get("current_query", "")
+    # sql_query = global_data.get("current_query", "")
     engine = get_engine_database(guid)
-    data = pd.read_sql(sql_query, engine)  # Execute the SQL query against the database
+    data = pd.read_sql(query, engine)  # Execute the SQL query against the database
     df = pd.DataFrame(data)
 
     column_info = "\n".join(
         [f"- {col}: {dtype}" for col, dtype in zip(df.columns, df.dtypes)]
     )
 
-    result = chain_with_history.invoke(  # noqa: T201
+    result = chain_chart.invoke(  # noqa: T201
         {
             "input": input,
             "column_info": column_info,
         },
-        config={"configurable": {"session_id": "chart"}}
+        # config={"configurable": {"session_id": "chart"}}
     )
 
     tool = PythonAstREPLTool(locals={"df": df, "px": px})
@@ -475,7 +1030,7 @@ def generateFromChart(input, guid):
     fixed_code = clean_generation_python(result.content)
     output = tool.run(fixed_code)
     print(output)
-    return json.loads(output)
+    return output
 
 
 def generateFromCustomPromptStream(input, custom_prompt_text, thread_guid):
@@ -551,35 +1106,16 @@ def handle_generate_query():
     data = request.json
     input_query = data.get("input")
     guid = data.get("guid")
+    thread_guid = data.get("thread_guid")
 
     if not input_query or not guid:
         return jsonify({"error": "Missing input query"}), 400
 
-    sql = generateQuery(input_query, guid)
+    sql = generateQuery(input_query, guid, thread_guid=thread_guid)
 
     # session["current_query"] = sql
 
     return sql
-
-
-@app.route("/nl-to-sql-stream", methods=["POST"])
-def handle_nl_to_sql():
-    # Get the JSON payload from the request
-    data = request.json
-    input_query = data.get("input")  # Extract the 'input' field
-
-    # Check if both 'input' and 'sql_input' are provided
-    if not input_query:
-        return jsonify({"error": "Missing input query or SQL query"}), 400
-
-    def generate_response():
-        for chunk in generateQueryStream(
-            input_query
-        ):
-            yield chunk  # Optional: separate chunks with newlines for easier parsing
-
-    return Response(stream_with_context(generate_response()), content_type="text/plain")
-
 
 @app.route("/generate-from-custom-prompt-stream", methods=["POST"])
 def handle_generate_from_custom_prompt_stream():
@@ -1212,10 +1748,13 @@ def handle_get_detail_thread(guid):
     # Iterate through messages and format them
     for message in history.messages:  # Loop through the messages
     # Extract the role from response_metadata['message']['role'] if it exists
-        role = message.response_metadata.get("message", {}).get("role", "user")  # Default to 'unknown' if not found
+        role = message.type or "user"  # Default to 'unknown' if not found
+        
         # Replace 'assistant' with 'system'
-        if role == "assistant":
+        if role == "ai":
             role = "system"
+        if role == "human":
+            role = "user"
         
         content = message.content  # Extract the content of the message
     

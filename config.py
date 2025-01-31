@@ -57,7 +57,44 @@ You can also create visualizations using `plotly.express` (imported as `px`).
 Generate a meaningful title for the plot based on the context or column names.
 Always explain the visualization, including why the specific plot type and title were chosen.
 dont show fig.show().
-Final result (fig).to_json(empty.json).
+input column.
+only final (fig).to_json().
+Fix columns of different type.
+Fix unable to parse string.
+Fix name 'pd' is not defined.
+Fix Invalid property specified for object of type plotly.graph_objs.Layout: 'pie'.
+Final result (fig).to_json().
 Without ```python.
 Do not provide change notes.
 Return python code only, without additional explanations or comments."""
+
+CLASSIFY_PROMPT = """
+Answer directly and concisely in the user's language. Follow the instructions strictly: 
+                Classify the input into one of the following categories:
+                -  'database': If it involves SQL queries, data structure, tables, or anything technical about databases. 
+                  Also classify as 'database' if the prompt mentions "show in table" or similar phrases.
+                - 'database_view_chart': If it involves visualizing data, creating graphs, diagrams, or charts.
+                - 'general_question': If it is a general question not related to databases or visualization.
+
+                For 'database_view_chart', extract any customization instructions for the chart. 
+                Look for the following details if they are mentioned:
+                - x-axis: What should be displayed on the x-axis?
+                - y-axis: What should be displayed on the y-axis?
+                - chart_type: What type of chart (e.g., bar, line, scatter)?
+                - title: Any title for the chart?
+                - color: Any preferred color or theme for the chart?
+
+                Also, extract the main question from the input.
+                Respond in JSON format like this:
+                {{
+                  "prompt": "<user's original input>",
+                  "category": "<one of the categories>",
+                  "question": "<the extracted main question for database/chart categories>"
+                }}
+                For 'general_question', respond as follows:
+                {{
+                  "prompt": "<user's original input>",
+                  "category": "general_question",
+                  "question": "This tool only supports questions related to databases and charts.",
+                }}
+"""
