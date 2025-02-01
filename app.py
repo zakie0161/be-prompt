@@ -1001,12 +1001,12 @@ def generateFromChart(input, query, guid, thread_guid):
 
     chain_chart = chart_prompt | llm
 
-    # chain_with_history = RunnableWithMessageHistory(
-    #     chain_chart,
-    #     get_by_session_id,  # Function to retrieve session history
-    #     input_messages_key="input",  # Key for the input messages
-    #     history_messages_key="history",  # Key for the message history
-    # )
+    chain_with_history = RunnableWithMessageHistory(
+        chain_chart,
+        get_by_session_id,  # Function to retrieve session history
+        input_messages_key="input",  # Key for the input messages
+        history_messages_key="history",  # Key for the message history
+    )
 
     # sql_query = global_data.get("current_query", "")
     engine = get_engine_database(guid)
@@ -1017,12 +1017,12 @@ def generateFromChart(input, query, guid, thread_guid):
         [f"- {col}: {dtype}" for col, dtype in zip(df.columns, df.dtypes)]
     )
 
-    result = chain_chart.invoke(  # noqa: T201
+    result = chain_with_history.invoke(  # noqa: T201
         {
             "input": input,
             "column_info": column_info,
         },
-        # config={"configurable": {"session_id": "chart"}}
+        config={"configurable": {"session_id": "chart|"+thread_guid}}
     )
 
     tool = PythonAstREPLTool(locals={"df": df, "px": px})

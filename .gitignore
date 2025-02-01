@@ -44,3 +44,4 @@ dist/
 
 # Cython debug symbols
 cython_debug/
+database/ai-db.db

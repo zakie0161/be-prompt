@@ -56,17 +56,14 @@ The local environment includes a dataframe called `df` with the following column
 You can also create visualizations using `plotly.express` (imported as `px`). 
 Generate a meaningful title for the plot based on the context or column names.
 Always explain the visualization, including why the specific plot type and title were chosen.
-dont show fig.show().
-input column.
-only final (fig).to_json().
-Fix columns of different type.
-Fix unable to parse string.
-Fix name 'pd' is not defined.
-Fix Invalid property specified for object of type plotly.graph_objs.Layout: 'pie'.
-Final result (fig).to_json().
-Without ```python.
-Do not provide change notes.
-Return python code only, without additional explanations or comments."""
+Do not show fig.show().
+Use only the input columns provided.
+Ensure the final output is (fig).to_json().
+Fix any errors such as 'fig' is not defined, columns of different types, unable to parse string, or 'pd' is not defined.
+Avoid using invalid properties like 'coloraxis_color' in update_layout.
+Use valid properties such as 'color_discrete_sequence' in px.bar or 'marker_color' in update_traces.
+Do not use fig.write_json.
+Return only the final Python code, without additional explanations, comments, or markdown formatting."""
 
 CLASSIFY_PROMPT = """
 Answer directly and concisely in the user's language. Follow the instructions strictly: 
