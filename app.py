@@ -83,7 +83,7 @@ def get_llm():
     callback_manager = CallbackManager([StreamingStdOutCallbackHandler()])
 
     llm_model = ChatOllama(
-        model="llama3.2",
+        model="deepseek-r1",
         temperature=0,
         # base_url=host,
         streaming=True,
@@ -1861,4 +1861,4 @@ def handle_get_list_core():
 if __name__ == "__main__":
     # app.run(port=8000, debug=True)
     initSqlite()
-    app.run(host="0.0.0.0", port=8000, debug=True)
+    app.run(host="0.0.0.0", port=7500, debug=True)
